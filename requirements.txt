@@ -1,0 +1,8 @@
+# Local relay, image selection and Excel export only.
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+openpyxl>=3.1.5,<4
+Pillow>=10.4,<12
+requests>=2.32,<3
+PyYAML>=6,<7
+httpx>=0.28,<1

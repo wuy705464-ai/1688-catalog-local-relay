@@ -1,0 +1,60 @@
+cookies_1688: ""
+
+vision:
+  provider: "doubao"
+  api_key_env: "ARK_API_KEY"
+  base_url_env: "ARK_BASE_URL"
+  model_env: "ARK_MODEL"
+  api_key: ""
+  # Official multimodal fallback. ARK_MODEL may override this with a Model ID
+  # or an ep-* inference endpoint. Values beginning with api-key-* are labels,
+  # not model identifiers, so the relay ignores those and uses this fallback.
+  model: "doubao-seed-2-0-lite-260215"
+  max_images_per_product: 8
+
+# 推荐主流程：油猴 -> 本机中转服务 -> SQLite -> 后台选图
+relay:
+  host: "127.0.0.1"
+  port: 8765
+  token: "CHANGE_ME_LOCAL_TOKEN"
+  database: "data/catalog.db"
+  worker_poll_seconds: 2.0
+  worker_max_attempts: 3
+
+image_selection:
+  candidate_count: 8
+  selected_count: 3
+  require_ai: true
+  min_width: 320
+  min_height: 320
+  max_download_mb: 15
+  request_timeout_seconds: 25
+  delete_unselected: true
+  allowed_image_hosts:
+    - "alicdn.com"
+    - "1688.com"
+
+catalog_export:
+  max_products_per_file: 150
+  embedded_image_size_px: [300, 150]
+  row_height_points: 125
+
+# 下面只保留给旧脚本兼容；新中转流程不需要登录 Cookie。
+proxy_file: ""
+concurrency: 12
+request_delay_ms: [1500, 3500]
+page_load_timeout_ms: 45000
+max_retries: 3
+
+image:
+  target_size: [800, 800]
+  white_bg: true
+  jpeg_quality: 88
+
+output:
+  template: "template.xlsx"
+  output_name: "catalog_filled.xlsx"
+  image_anchor_col: "E"
+  image_size_px: [120, 120]
+
+progress_file: "progress.json"

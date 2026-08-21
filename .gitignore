@@ -1,0 +1,17 @@
+.venv/
+.env
+*.env
+cookies.txt
+__pycache__/
+*.pyc
+data/*.db
+data/*.db-wal
+data/*.db-shm
+logs/
+output/
+products/candidates/
+products/selected/
+tests/_runtime/
+tests/_tmp/
+.pytest_cache/
+config.local.yaml
