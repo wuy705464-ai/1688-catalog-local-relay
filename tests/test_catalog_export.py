@@ -14,7 +14,7 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from scripts.export_customer_catalog import export_one  # noqa: E402
+from scripts.export_customer_catalog import export_master_atomic, export_one  # noqa: E402
 from src.local_store import LocalStore  # noqa: E402
 
 
@@ -87,12 +87,45 @@ class CatalogExportTests(unittest.TestCase):
             self.assertEqual(len(ws._images), 2)
             self.assertEqual([image.anchor._from.row for image in ws._images], [2, 3])
             self.assertIn("链长: 45cm", ws["F3"].value)
+            self.assertEqual(ws.freeze_panes, "A3")
+            self.assertEqual(len(ws.sheet_view.selection), 1)
+            self.assertEqual(ws.sheet_view.selection[0].pane, "bottomLeft")
+            self.assertEqual(ws.sheet_view.selection[0].sqref, "A3")
 
             rows = json.loads(manifest.read_text(encoding="utf-8"))
             self.assertEqual({row["offer_id"] for row in rows}, {"940000000001", "940000000002"})
             self.assertEqual({row["row"] for row in rows}, {3, 4})
             for row in rows:
                 self.assertTrue(all(row["offer_id"] in image["sha256"] for image in row["selected_images"]))
+
+            master_template = temp / "master.xlsx"
+            shutil.copy2(ROOT / "template.xlsx", master_template)
+            master_path, master_manifest = export_master_atomic(
+                master_template,
+                products,
+                master_template,
+                cfg,
+                finalize=False,
+            )
+            self.assertEqual(master_path, master_template.resolve())
+            self.assertTrue(master_manifest.exists())
+            master_wb = load_workbook(master_path)
+            self.assertIsNone(master_wb["Product Catalog"].freeze_panes)
+            self.assertIsNone(master_wb["How to Use"].freeze_panes)
+            self.assertEqual(
+                {master_wb["Product Catalog"]["C3"].value, master_wb["Product Catalog"]["C4"].value},
+                {"1688-940000000001", "1688-940000000002"},
+            )
+
+            export_master_atomic(
+                ROOT / "template.xlsx",
+                products,
+                master_template,
+                cfg,
+                finalize=True,
+            )
+            finalized_wb = load_workbook(master_template)
+            self.assertEqual(finalized_wb["Product Catalog"].freeze_panes, "A3")
         finally:
             shutil.rmtree(temp, ignore_errors=True)
 

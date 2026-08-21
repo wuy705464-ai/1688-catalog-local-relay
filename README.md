@@ -80,6 +80,20 @@ python scripts\export_customer_catalog.py
 
 默认按分类分别导出，每个文件最多 150 个商品。客户表中的主要字段为：
 
+采集期间同步到一个主表（默认不冻结窗格，Excel 必须先关闭）：
+
+```powershell
+python scripts\export_customer_catalog.py --master-output "C:\path\AI外贸产品目录 Product Catalog.xlsx"
+```
+
+全部爬取和 AI 选图完成后，再生成最终锁定视图：
+
+```powershell
+python scripts\export_customer_catalog.py --master-output "C:\path\AI外贸产品目录 Product Catalog.xlsx" --finalize
+```
+
+主表更新使用临时文件完整生成后再原子替换；导出前仍强制校验 `offer_id + record_hash + 3 张图片`，因此不会把 A 商品的图片写到 B 商品行。冻结窗格只影响浏览，不会解除 Excel 打开文件时的系统占用；同步前需关闭该工作簿。
+
 - B：分类
 - C：稳定 SKU（`1688-<offer_id>`）
 - D：商品标题
