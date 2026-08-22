@@ -40,6 +40,19 @@ const startRow = 3;
 const lastDataRow = startRow + rows.length - 1;
 const groups = new Map();
 for (const row of rows) groups.set(row.category_en, [...(groups.get(row.category_en) || []), row]);
+const categoryTabs = [
+  ["Charms & Pendants", "饰品配饰"],
+  ["Necklaces & Pendants", "项链"],
+  ["Bracelets", "手链"],
+  ["Rings", "戒指"],
+  ["Earrings", "耳环"],
+  ["Brooches", "胸针"],
+  ["Anklets", "脚链"],
+  ["Bangles & Bracelets", "手镯"],
+  ["Jewelry Sets", "首饰套装"],
+  ["Beading Components", "串珠配件"],
+  ["Hair Accessories", "发饰"],
+];
 const summaryRows = [...groups.values()].reduce((total, group) => total + group.length + 2, 0);
 const summaryStart = lastDataRow + 3;
 const finalRow = summaryStart + summaryRows;
@@ -72,6 +85,11 @@ catalog.getRange(`A${startRow}:S${lastDataRow}`).values = rows.map((item) => [
   null,
 ]);
 catalog.getRange(`A${startRow}:S${lastDataRow}`).format.rowHeight = 168;
+catalog.getRange(`A${startRow}:S${lastDataRow}`).format.borders = {
+  preset: "all",
+  style: "thin",
+  color: "#D9D9D9",
+};
 catalog.getRange(`F${startRow}:F${lastDataRow}`).format = {
   wrapText: true,
   horizontalAlignment: "left",
@@ -83,6 +101,11 @@ catalog.getRange(`B${startRow}:S${lastDataRow}`).format.verticalAlignment = "cen
 catalog.getRange(`A${startRow}:C${lastDataRow}`).format.horizontalAlignment = "center";
 catalog.getRange(`G${startRow}:S${lastDataRow}`).format.horizontalAlignment = "center";
 catalog.getRange(`E${startRow}:E${lastDataRow}`).format.columnWidthPx = 420;
+catalog.getRange(`A${startRow}:S${lastDataRow}`).format.borders = {
+  preset: "all",
+  style: "thin",
+  color: "#D9D9D9",
+};
 
 for (let index = 0; index < rows.length; index += 1) {
   const imageBytes = await fs.readFile(rows[index].collage_path);
@@ -133,6 +156,96 @@ for (const [category, group] of [...groups.entries()].sort(([left], [right]) => 
   rowCursor = end + 2;
 }
 
+const categoryColumnWidthsPx = [
+  52, 112, 138, 188, 420, 420, 180, 150, 80, 175,
+  112, 190, 105, 185, 130, 210, 150, 150, 150,
+];
+for (const [category, tabName] of categoryTabs) {
+  const group = groups.get(category) || [];
+  if (group.length === 0) continue;
+  const categorySheet = workbook.worksheets.add(tabName);
+  const categoryLastRow = startRow + group.length - 1;
+
+  catalog.getRange("A1:S2").copyTo(categorySheet.getRange("A1:S2"), "all");
+  categorySheet.getRange("A1:S1").merge();
+  categorySheet.getRange("A1").values = [[`${tabName} / ${category} — ${group.length} Products`]];
+  categorySheet.getRange("A1:S1").format = {
+    fill: "#1F4E78",
+    font: { bold: true, color: "#FFFFFF", size: 14 },
+    horizontalAlignment: "left",
+    verticalAlignment: "center",
+  };
+  categorySheet.getRange("A1:S1").format.rowHeight = 30;
+  categorySheet.getRange("A2:S2").format = {
+    fill: "#1F4E78",
+    font: { bold: true, color: "#FFFFFF", size: 11 },
+    horizontalAlignment: "center",
+    verticalAlignment: "center",
+    wrapText: true,
+    borders: { preset: "all", style: "thin", color: "#D9E2F3" },
+  };
+  categorySheet.getRange("A2:S2").format.rowHeight = 54;
+
+  for (let row = startRow; row <= categoryLastRow; row += 1) {
+    catalog.getRange("A3:S3").copyTo(categorySheet.getRange(`A${row}:S${row}`), "all");
+  }
+  categorySheet.getRange(`A${startRow}:S${categoryLastRow}`).clear({ applyTo: "contents" });
+  categorySheet.getRange(`A${startRow}:S${categoryLastRow}`).values = group.map((item) => [
+    item.number,
+    item.category_en,
+    item.sku,
+    null,
+    null,
+    item.key_features_en,
+    item.price_display,
+    null,
+    null,
+    item.price_display.includes("Tiered Price") ? "Tiered pricing available" : "",
+    item.material_en,
+    item.size_en,
+    item.weight_en || "",
+    item.color_en,
+    item.style_en,
+    item.occasion_en,
+    null,
+    null,
+    null,
+  ]);
+  categorySheet.getRange(`A${startRow}:S${categoryLastRow}`).format.rowHeight = 168;
+  categorySheet.getRange(`A${startRow}:S${categoryLastRow}`).format.borders = {
+    preset: "all",
+    style: "thin",
+    color: "#D9D9D9",
+  };
+  categorySheet.getRange(`F${startRow}:F${categoryLastRow}`).format = {
+    wrapText: true,
+    horizontalAlignment: "left",
+    verticalAlignment: "center",
+    font: { size: 9 },
+  };
+  categorySheet.getRange(`B${startRow}:S${categoryLastRow}`).format.wrapText = true;
+  categorySheet.getRange(`B${startRow}:S${categoryLastRow}`).format.verticalAlignment = "center";
+  categorySheet.getRange(`A${startRow}:C${categoryLastRow}`).format.horizontalAlignment = "center";
+  categorySheet.getRange(`G${startRow}:S${categoryLastRow}`).format.horizontalAlignment = "center";
+  categorySheet.getRange(`A${startRow}:S${categoryLastRow}`).format.borders = {
+    preset: "all",
+    style: "thin",
+    color: "#D9D9D9",
+  };
+  for (let col = 0; col < categoryColumnWidthsPx.length; col += 1) {
+    categorySheet.getRangeByIndexes(0, col, categoryLastRow, 1).format.columnWidthPx = categoryColumnWidthsPx[col];
+  }
+  for (let index = 0; index < group.length; index += 1) {
+    const imageBytes = await fs.readFile(group[index].collage_path);
+    categorySheet.images.add({
+      dataUrl: `data:image/jpeg;base64,${imageBytes.toString("base64")}`,
+      anchor: { from: { row: startRow - 1 + index, col: 4 }, extent: { widthPx: 360, heightPx: 180 } },
+    });
+  }
+  categorySheet.freezePanes.freezeRows(2);
+  categorySheet.showGridLines = false;
+}
+
 guide.getRange("B13").values = [["Product names are intentionally blank for this same-factory catalog. Use the SKU and Item No. as the product reference."]];
 guide.getRange("B14").values = [["Each row contains a white-background cover and two supplementary views. Colors and sizes are source-led where available; otherwise they use a practical catalog-level fallback for buyer reference."]];
 catalog.showGridLines = false;
@@ -153,6 +266,12 @@ for (const [name, sheetName, range] of [
   const image = await workbook.render({ sheetName, range, scale: 1, format: "png" });
   await fs.writeFile(path.join(previewDir, name), new Uint8Array(await image.arrayBuffer()));
 }
+for (const [category, tabName] of categoryTabs) {
+  const group = groups.get(category) || [];
+  if (group.length === 0) continue;
+  const image = await workbook.render({ sheetName: tabName, range: `A1:S${Math.min(group.length + 2, 5)}`, scale: 1, format: "png" });
+  await fs.writeFile(path.join(previewDir, `category-${tabName}.png`), new Uint8Array(await image.arrayBuffer()));
+}
 const output = await SpreadsheetFile.exportXlsx(workbook);
 await output.save(outputPath);
-console.log(JSON.stringify({ outputPath, products: rows.length, summaryStart, finalRow, categories: groups.size }));
+console.log(JSON.stringify({ outputPath, products: rows.length, summaryStart, finalRow, categories: groups.size, categoryTabs: categoryTabs.length }));
