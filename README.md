@@ -110,6 +110,7 @@ python scripts\export_customer_catalog.py --master-output "C:\path\AI外贸产�
 ```powershell
 python -m unittest tests.test_local_relay tests.test_image_worker tests.test_catalog_export tests.test_relay_api -v
 node --check userscripts\1688-catalog-local-relay.user.js
+node tests\userscript_image_filter.test.js
 ```
 
 真实豆包测试会产生一次小额调用：

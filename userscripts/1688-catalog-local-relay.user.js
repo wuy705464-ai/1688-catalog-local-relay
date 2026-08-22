@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         1688 catalog local relay collector v3
 // @namespace    local.1688.catalog
-// @version      3.0.0
+// @version      3.0.1
 // @description  Capture one atomic product snapshot, queue it in IndexedDB, then sync to the localhost SQLite relay.
 // @match        https://detail.1688.com/offer/*.html*
 // @match        https://m.1688.com/offer/*.html*
@@ -245,7 +245,7 @@
     function normalizeImageUrl(raw) {
         if (!raw || /^data:/i.test(raw)) return '';
         try {
-            const url = new URL(String(raw).replace(/&amp;/g, '&'), location.href);
+            const url = new URL(String(raw).replace(/\\\//g, '/').replace(/&amp;/g, '&'), location.href);
             if (!/^https?:$/.test(url.protocol)) return '';
             url.protocol = 'https:';
             return url.href;
@@ -255,54 +255,100 @@
     function imageKey(url) {
         try {
             const parsed = new URL(url);
-            return (parsed.hostname + parsed.pathname)
+            const path = parsed.pathname
+                .replace(/(\.(?:jpe?g|png|webp))_(?:\d+x\d+(?:q\d+)?|[^/?]*)\.(?:jpe?g|png|webp)$/i, '$1')
                 .replace(/_\d+x\d+(?:q\d+)?(?=\.(?:jpg|jpeg|png|webp)$)/i, '')
                 .toLowerCase();
+            return (parsed.hostname + path).toLowerCase();
         } catch (_) { return url.toLowerCase(); }
+    }
+
+    function embeddedImageSize(url) {
+        try {
+            const path = decodeURIComponent(new URL(url).pathname);
+            const tps = path.match(/-\d+-tps-(\d+)-(\d+)(?:\.|$)/i);
+            if (tps) return [Number(tps[1]), Number(tps[2])];
+            const resized = path.match(/_(\d+)x(\d+)(?:q\d+)?(?=\.(?:jpe?g|png|webp)$)/i);
+            if (resized) return [Number(resized[1]), Number(resized[2])];
+        } catch (_) { /* ignore malformed URLs */ }
+        return null;
+    }
+
+    function isPageAssetUrl(url) {
+        const lower = url.toLowerCase();
+        if (!/\.(?:jpe?g|png|webp)(?:$|[?#_])/i.test(lower)) return true;
+        if (/(?:avatar|logo|icon|loading|spacer|qrcode|emoji|sprite|favicon)/i.test(lower)) return true;
+        if (/(?:-rate\.|\/rate\/|comment|review)/i.test(lower)) return true;
+        if (/-\d+-tps-/i.test(lower)) return true;
+        const size = embeddedImageSize(url);
+        return Boolean(size && (size[0] < 320 || size[1] < 320));
+    }
+
+    function imageScore(url, sourcePriority) {
+        let score = sourcePriority;
+        try {
+            const parsed = new URL(url);
+            const host = parsed.hostname.toLowerCase();
+            const path = parsed.pathname.toLowerCase();
+            if (host === 'cbu01.alicdn.com' && path.includes('/img/ibank/')) score += 2400;
+            else if (path.includes('/img/ibank/')) score += 1900;
+            if (/-0-cib\./i.test(path)) score += 500;
+            if (/\.(?:jpe?g|webp)(?:$|_)/i.test(path)) score += 120;
+            if (path.includes('/imgextra/')) score -= 100;
+        } catch (_) { /* normalized URLs are expected to parse */ }
+        return score;
     }
 
     function extractImageUrls() {
         const highPrioritySelectors = [
             '[class*="gallery"] img', '[class*="Gallery"] img',
+            '[class*="detail-gallery"] img', '[class*="image-viewer"] img',
             '[class*="main-image"] img', '[class*="mainImage"] img',
             '[class*="image-list"] img', '[class*="imageList"] img',
             '[class*="offer-img"] img', '[class*="od-pc-offer-image"] img',
             '[class*="thumbnail"] img', '[class*="thumb"] img',
+            '[data-testid*="gallery"] img', '[data-testid*="image"] img',
             'video[poster]',
         ];
         const ordered = [];
         const seenElements = new Set();
         for (const selector of highPrioritySelectors) {
             for (const element of document.querySelectorAll(selector)) {
-                if (!seenElements.has(element)) { seenElements.add(element); ordered.push(element); }
+                if (!seenElements.has(element)) { seenElements.add(element); ordered.push([element, 700]); }
             }
         }
         for (const element of document.querySelectorAll('img')) {
             const rect = element.getBoundingClientRect();
             const source = `${element.currentSrc || ''} ${element.src || ''}`.toLowerCase();
             if ((rect.top + scrollY < 2200 && rect.width >= 45 && rect.height >= 45) || source.includes('imgextra')) {
-                if (!seenElements.has(element)) { seenElements.add(element); ordered.push(element); }
+                if (!seenElements.has(element)) { seenElements.add(element); ordered.push([element, 200]); }
             }
         }
-        const urls = [];
-        const seen = new Set();
-        function add(raw) {
+        const ranked = new Map();
+        let order = 0;
+        function add(raw, sourcePriority = 0) {
             const url = normalizeImageUrl(raw);
-            if (!url || /(avatar|logo|icon|loading|spacer|qrcode)/i.test(url)) return;
+            if (!url || isPageAssetUrl(url)) return;
             if (!/(alicdn|1688)/i.test(url)) return;
             const key = imageKey(url);
-            if (seen.has(key)) return;
-            seen.add(key); urls.push(url);
+            const candidate = { url, score: imageScore(url, sourcePriority), order: order++ };
+            const existing = ranked.get(key);
+            if (!existing || candidate.score > existing.score) ranked.set(key, candidate);
         }
-        ordered.forEach(element => elementImageUrls(element).forEach(add));
+        ordered.forEach(([element, priority]) => elementImageUrls(element).forEach(url => add(url, priority)));
 
-        if (urls.length < 12) {
-            const html = document.documentElement.outerHTML;
-            const regex = /https?:\\?\/\\?\/[^"'\s<>]+?\.(?:jpg|jpeg|png|webp)(?:\?[^"'\s<>]*)?/gi;
-            let match;
-            while ((match = regex.exec(html)) !== null && urls.length < 32) add(match[0].replace(/\\\//g, '/'));
+        const html = document.documentElement.outerHTML;
+        const regex = /https?:\\?\/\\?\/[^"'\s<>]+?\.(?:jpg|jpeg|png|webp)(?:\?[^"'\s<>]*)?/gi;
+        let match;
+        let scanned = 0;
+        while ((match = regex.exec(html)) !== null && scanned < 512) {
+            add(match[0], 0);
+            scanned += 1;
         }
-        return urls.slice(0, 32);
+        return [...ranked.values()]
+            .sort((left, right) => right.score - left.score || left.order - right.order)
+            .slice(0, 32)
+            .map(item => item.url);
     }
 
     function collectRecord() {
@@ -391,7 +437,7 @@
     function createPanel() {
         panel = document.createElement('div');
         panel.innerHTML = `
-          <div style="font-weight:700;color:#ff6a00;margin-bottom:5px">1688 本机采集器 v3</div>
+          <div style="font-weight:700;color:#ff6a00;margin-bottom:5px">1688 本机采集器 v3.0.1</div>
           <div class="relay-state">检查中</div>
           <div>数据库：<b class="relay-total">0</b> / 选图完成：<b class="relay-ready">0</b></div>
           <div>待发送：<b class="relay-pending">0</b></div>

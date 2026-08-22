@@ -7,10 +7,12 @@ __pycache__/
 data/*.db
 data/*.db-wal
 data/*.db-shm
+data/backups/
 logs/
 output/
 products/candidates/
 products/selected/
+work/
 tests/_runtime/
 tests/_tmp/
 .pytest_cache/
