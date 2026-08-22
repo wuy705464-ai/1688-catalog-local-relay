@@ -13,6 +13,13 @@ function displayItemNo(value) {
   return /^\d+$/.test(itemNo) ? `Ref-${itemNo}` : itemNo;
 }
 
+function lowestRmbPrice(value) {
+  const prices = [...String(value || "").matchAll(/\d+(?:\.\d+)?/g)]
+    .map((match) => Number(match[0]))
+    .filter(Number.isFinite);
+  return prices.length ? Math.min(...prices) : null;
+}
+
 const inputPath = option("--input");
 const templatePath = option("--template");
 const outputPath = option("--out");
@@ -70,13 +77,13 @@ catalog.getRange(`A${startRow}:S${lastDataRow}`).values = rows.map((item) => [
   null,
   null,
   item.key_features_en,
-  item.price_display,
+  lowestRmbPrice(item.price_display),
   null,
   null,
-  item.price_display.includes("Tiered Price") ? "Tiered pricing available" : "",
+  null,
   item.material_en,
   item.size_en,
-  item.weight_en || "",
+  null,
   item.color_en,
   item.style_en,
   item.occasion_en,
@@ -100,6 +107,7 @@ catalog.getRange(`B${startRow}:S${lastDataRow}`).format.wrapText = true;
 catalog.getRange(`B${startRow}:S${lastDataRow}`).format.verticalAlignment = "center";
 catalog.getRange(`A${startRow}:C${lastDataRow}`).format.horizontalAlignment = "center";
 catalog.getRange(`G${startRow}:S${lastDataRow}`).format.horizontalAlignment = "center";
+catalog.getRange(`G${startRow}:G${lastDataRow}`).format.numberFormat = '"¥"0.00';
 catalog.getRange(`E${startRow}:E${lastDataRow}`).format.columnWidthPx = 420;
 catalog.getRange(`A${startRow}:S${lastDataRow}`).format.borders = {
   preset: "all",
@@ -197,13 +205,13 @@ for (const [category, tabName] of categoryTabs) {
     null,
     null,
     item.key_features_en,
-    item.price_display,
+    lowestRmbPrice(item.price_display),
     null,
     null,
-    item.price_display.includes("Tiered Price") ? "Tiered pricing available" : "",
+    null,
     item.material_en,
     item.size_en,
-    item.weight_en || "",
+    null,
     item.color_en,
     item.style_en,
     item.occasion_en,
@@ -227,6 +235,7 @@ for (const [category, tabName] of categoryTabs) {
   categorySheet.getRange(`B${startRow}:S${categoryLastRow}`).format.verticalAlignment = "center";
   categorySheet.getRange(`A${startRow}:C${categoryLastRow}`).format.horizontalAlignment = "center";
   categorySheet.getRange(`G${startRow}:S${categoryLastRow}`).format.horizontalAlignment = "center";
+  categorySheet.getRange(`G${startRow}:G${categoryLastRow}`).format.numberFormat = '"¥"0.00';
   categorySheet.getRange(`A${startRow}:S${categoryLastRow}`).format.borders = {
     preset: "all",
     style: "thin",
@@ -248,6 +257,7 @@ for (const [category, tabName] of categoryTabs) {
 
 guide.getRange("B13").values = [["Product names are intentionally blank for this same-factory catalog. Use the SKU and Item No. as the product reference."]];
 guide.getRange("B14").values = [["Each row contains a white-background cover and two supplementary views. Colors and sizes are source-led where available; otherwise they use a practical catalog-level fallback for buyer reference."]];
+guide.getRange("B6").values = [["This column is intentionally left blank in this delivery version."]];
 catalog.showGridLines = false;
 
 const top = await workbook.inspect({ kind: "table", range: "Product Catalog!A1:S6", include: "values,formulas", tableMaxRows: 6, tableMaxCols: 19, maxChars: 10000 });
