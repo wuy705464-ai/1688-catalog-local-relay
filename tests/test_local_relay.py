@@ -106,6 +106,29 @@ class LocalRelayStoreTests(unittest.TestCase):
         self.assertEqual(exported[0]["offer_id"], "920000000001")
         self.assertEqual([i["offer_id"] for i in exported[0]["selected_images"]], ["920000000001"] * 3)
 
+    def test_tracking_and_cdn_variants_keep_completed_selection(self):
+        offer_id = "920000000004"
+        first = self.store.upsert_product(record(offer_id))
+        job = self.store.claim_next_job("test-worker")
+        self.assertTrue(self.store.complete_selection(
+            offer_id, job["version_hash"], self.make_candidates(offer_id, job["version_hash"]), "test", 3
+        ))
+
+        repeat = record(offer_id)
+        repeat["url"] = f"https://detail.1688.com/offer/{offer_id}.html?spm=a262eq.123"
+        repeat["image_urls"] = [
+            f"https://cbu01.alicdn.com/imgextra/{offer_id}/{index}.jpg_.webp?x-oss-process=image/resize,w_400"
+            for index in reversed(range(8))
+        ]
+        duplicate = self.store.upsert_product(repeat)
+
+        self.assertTrue(duplicate["unchanged"])
+        self.assertEqual(duplicate["record_hash"], first["record_hash"])
+        self.assertEqual(duplicate["selection_status"], "ready")
+        exported = self.store.products_for_export()
+        self.assertEqual(len(exported), 1)
+        self.assertEqual(len(exported[0]["selected_images"]), 3)
+
     def test_stale_worker_cannot_attach_images_to_new_record(self):
         first = self.store.upsert_product(record("920000000003", "旧标题"))
         old_job = self.store.claim_next_job("old-worker")

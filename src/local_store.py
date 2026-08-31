@@ -13,6 +13,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+from urllib.parse import urlsplit
 
 
 OFFER_ID_RE = re.compile(r"^\d{5,30}$")
@@ -47,6 +48,33 @@ def _unique_urls(values: Iterable[Any], limit: int = 40) -> List[str]:
         if len(out) >= limit:
             break
     return out
+
+
+def _image_identity(value: str) -> str:
+    """Return a stable identity for a 1688 image despite delivery variants.
+
+    1688/Alibaba CDNs may add query strings or resize/transcode suffixes such
+    as ``.jpg_.webp`` to the same underlying image.  Those presentation-only
+    changes must not consume another visual-selection run for an already
+    completed offer.
+    """
+    try:
+        parsed = urlsplit(value)
+        host = parsed.hostname.lower() if parsed.hostname else ""
+        # CDN subdomains are interchangeable delivery hosts for the same
+        # Alibaba image path. Keep non-Alibaba hosts distinct.
+        if host.endswith("alicdn.com"):
+            host = "alicdn.com"
+        path = parsed.path
+        path = re.sub(
+            r"(?i)(\.(?:jpe?g|png))(?:_[^/?#]*)\.(?:webp|avif)$",
+            r"\1",
+            path,
+        )
+        path = re.sub(r"(?i)_\d+x\d+(?:q\d+)?(?=\.(?:jpe?g|png|webp)$)", "", path)
+        return f"{host}{path}".lower()
+    except (TypeError, ValueError):
+        return str(value or "").split("#", 1)[0].split("?", 1)[0].lower()
 
 
 def validate_record(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -87,7 +115,20 @@ def validate_record(record: Dict[str, Any]) -> Dict[str, Any]:
         "image_urls": image_urls,
         "collected_at": _clean_text(record.get("collected_at"), 80) or utc_now(),
     }
-    hash_payload = {k: cleaned[k] for k in cleaned if k != "collected_at"}
+    # The current page URL is intentionally excluded: 1688 navigation adds
+    # tracking parameters (for example spm) while the offer_id is unchanged.
+    # Canonical image identities are sorted so lazy-load order and CDN
+    # resize/transcode variants do not reset a completed three-image choice.
+    hash_payload = {
+        "schema_version": cleaned["schema_version"],
+        "offer_id": cleaned["offer_id"],
+        "title": cleaned["title"],
+        "category": cleaned["category"],
+        "price": cleaned["price"],
+        "size": cleaned["size"],
+        "specs": cleaned["specs"],
+        "image_identities": sorted({_image_identity(url) for url in image_urls}),
+    }
     cleaned["record_hash"] = hashlib.sha256(_json(hash_payload).encode("utf-8")).hexdigest()
     return cleaned
 
