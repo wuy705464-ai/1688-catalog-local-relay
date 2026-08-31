@@ -225,10 +225,43 @@ class LocalStore:
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
-                "SELECT record_hash, selection_status FROM products WHERE offer_id=?",
+                "SELECT record_hash, selection_status, raw_json FROM products WHERE offer_id=?",
                 (cleaned["offer_id"],),
             ).fetchone()
             unchanged = bool(existing and existing["record_hash"] == cleaned["record_hash"])
+
+            # Records completed by older relay versions used the full page URL
+            # and raw image delivery URLs in their hash.  Compare their saved
+            # snapshot with the new canonical rule once, then migrate the hash
+            # in place so a software update itself cannot discard three saved
+            # selections.
+            compatible_legacy_ready = False
+            if existing and not unchanged and existing["selection_status"] == "ready":
+                try:
+                    prior = json.loads(str(existing["raw_json"] or "{}"))
+                    compatible_legacy_ready = (
+                        validate_record(prior)["record_hash"] == cleaned["record_hash"]
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    compatible_legacy_ready = False
+
+            if compatible_legacy_ready:
+                conn.execute(
+                    """UPDATE products SET source_url=?, title=?, category=?, price_display=?, size_raw=?,
+                       raw_json=?, record_hash=?, collected_at=?, received_at=?, updated_at=?
+                       WHERE offer_id=?""",
+                    (
+                        cleaned["url"], cleaned["title"], cleaned["category"],
+                        cleaned["price"]["display"], cleaned["size"]["raw"], raw_json,
+                        cleaned["record_hash"], cleaned["collected_at"], now, now, cleaned["offer_id"],
+                    ),
+                )
+                return {
+                    "offer_id": cleaned["offer_id"],
+                    "record_hash": cleaned["record_hash"],
+                    "unchanged": True,
+                    "selection_status": "ready",
+                }
 
             if unchanged:
                 conn.execute(

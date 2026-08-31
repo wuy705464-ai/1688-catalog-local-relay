@@ -120,6 +120,9 @@ class LocalRelayStoreTests(unittest.TestCase):
             f"https://cbu01.alicdn.com/imgextra/{offer_id}/{index}.jpg_.webp?x-oss-process=image/resize,w_400"
             for index in reversed(range(8))
         ]
+        # Simulate a completed record written by the old full-URL hash rule.
+        with self.store.connect() as conn:
+            conn.execute("UPDATE products SET record_hash='legacy-url-sensitive-hash' WHERE offer_id=?", (offer_id,))
         duplicate = self.store.upsert_product(repeat)
 
         self.assertTrue(duplicate["unchanged"])
