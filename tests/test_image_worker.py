@@ -41,7 +41,7 @@ class ImageWorkerTests(unittest.TestCase):
         self.store = LocalStore(self.root / "data" / "catalog.db")
         self.cfg = {
             "relay": {"worker_max_attempts": 3},
-            "image_selection": {"candidate_count": 8, "selected_count": 3, "delete_unselected": True},
+            "image_selection": {"candidate_count": 8, "selected_count": 3, "delete_unselected": False},
             "vision": {"provider": "doubao"},
         }
 
@@ -72,12 +72,12 @@ class ImageWorkerTests(unittest.TestCase):
     @staticmethod
     def fake_ai(record, candidates, selected_count, cfg):
         return [
-            {"index": 1, "rank": 1, "role": "hero", "reason": "main"},
-            {"index": 4, "rank": 2, "role": "detail", "reason": "detail"},
-            {"index": 7, "rank": 3, "role": "lifestyle", "reason": "scene"},
+            {"index": 1, "rank": 1, "role": "white_background_product", "reason": "white background"},
+            {"index": 4, "rank": 2, "role": "worn_on_person", "reason": "worn image"},
+            {"index": 7, "rank": 3, "role": "worn_on_person", "reason": "worn image"},
         ], "doubao-test"
 
-    def test_downloads_eight_and_keeps_only_three_in_offer_scoped_folder(self):
+    def test_downloads_eight_archives_candidates_and_keeps_three_selected_images(self):
         offer_id = "930000000001"
         self.store.upsert_product(product_record(offer_id))
         with patch.object(image_selector, "PROJECT_ROOT", self.root), \
@@ -93,7 +93,30 @@ class ImageWorkerTests(unittest.TestCase):
         paths = [Path(row["local_path"]) for row in selected]
         self.assertTrue(all(offer_id in path.parts for path in paths))
         self.assertEqual(len(list(paths[0].parent.glob("*.jpg"))), 3)
-        self.assertFalse((self.root / "products" / "candidates" / offer_id).exists())
+        candidate_dir = self.root / "products" / "candidates" / offer_id / rows[0]["record_hash"][:16]
+        self.assertEqual(len(list(candidate_dir.glob("*.jpg"))), 8)
+        with self.store.connect() as conn:
+            archived = conn.execute(
+                "SELECT local_path FROM product_images WHERE offer_id=? AND is_selected=0",
+                (offer_id,),
+            ).fetchall()
+        self.assertEqual(len(archived), 5)
+        self.assertTrue(all(Path(row["local_path"]).exists() for row in archived))
+
+    def test_refresh_requeues_without_changing_the_product_record_hash(self):
+        offer_id = "930000000002"
+        initial = self.store.upsert_product(product_record(offer_id))
+        queued = self.store.requeue_image_refresh(limit=1)
+        self.assertEqual(queued, [offer_id])
+        with self.store.connect() as conn:
+            row = conn.execute(
+                "SELECT record_hash, selection_status FROM products WHERE offer_id=?", (offer_id,)
+            ).fetchone()
+            job = conn.execute("SELECT status, attempts FROM image_jobs WHERE offer_id=?", (offer_id,)).fetchone()
+        self.assertEqual(row["record_hash"], initial["record_hash"])
+        self.assertEqual(row["selection_status"], "pending")
+        self.assertEqual(job["status"], "pending")
+        self.assertEqual(job["attempts"], 0)
 
 
 if __name__ == "__main__":

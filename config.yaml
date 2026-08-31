@@ -10,7 +10,7 @@ vision:
   # or an ep-* inference endpoint. Values beginning with api-key-* are labels,
   # not model identifiers, so the relay ignores those and uses this fallback.
   model: "doubao-seed-2-0-lite-260215"
-  max_images_per_product: 8
+  max_images_per_product: 12
 
 # 推荐主流程：油猴 -> 本机中转服务 -> SQLite -> 后台选图
 relay:
@@ -20,16 +20,20 @@ relay:
   database: "data/catalog.db"
   worker_poll_seconds: 2.0
   worker_max_attempts: 3
+  worker_count: 4
 
 image_selection:
-  candidate_count: 8
+  # Preserve enough candidates to find a white-background hero and, where the
+  # source gallery provides them, on-person/worn views.  All candidates stay
+  # local for future re-selection.
+  candidate_count: 12
   selected_count: 3
   require_ai: true
   min_width: 320
   min_height: 320
   max_download_mb: 15
   request_timeout_seconds: 25
-  delete_unselected: true
+  delete_unselected: false
   allowed_image_hosts:
     - "alicdn.com"
     - "1688.com"

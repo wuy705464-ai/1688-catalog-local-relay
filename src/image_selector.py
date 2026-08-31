@@ -1,8 +1,11 @@
-"""Persistent background worker: download eight candidates and retain three.
+"""Persistent image worker with auditable candidate retention.
 
-Candidate files are temporary. Selected files live in a versioned directory
-``products/selected/<offer_id>/<record_hash_prefix>/``. SQLite stores that same
-offer id and record hash; exporters reject any path that does not match both.
+Each product keeps its downloaded candidates in a versioned directory and
+copies exactly three approved images to ``products/selected``.  Rank 1 is a
+white-background product image.  Ranks 2-3 prioritize genuine on-person/worn
+views, but use clean complementary product views when the source gallery has
+no further worn images.  Offer ID and record hash are checked before any result
+is committed, so an asynchronous job cannot attach images to another product.
 """
 from __future__ import annotations
 
@@ -33,7 +36,14 @@ except ImportError:  # pragma: no cover - direct script compatibility
 
 
 logger = logging.getLogger("image_selector")
-ALLOWED_ROLES = {"hero", "detail", "lifestyle", "variant", "package", "size_chart"}
+WHITE_BACKGROUND_ROLE = "white_background_product"
+WEARING_ROLE = "worn_on_person"
+SUPPLEMENTARY_ROLE = "supplementary_product_view"
+ALLOWED_ROLES = {WHITE_BACKGROUND_ROLE, WEARING_ROLE, SUPPLEMENTARY_ROLE}
+
+
+class NeedsHumanVisualReview(RuntimeError):
+    """The source gallery cannot satisfy the customer's mandatory image mix."""
 
 
 def _host_allowed(url: str, allowed_suffixes: List[str]) -> bool:
@@ -174,6 +184,20 @@ def _parse_json_object(text: str) -> Dict[str, Any]:
     return json.loads(match.group(0))
 
 
+def _validate_role_order(selection: List[Dict[str, Any]], selected_count: int) -> None:
+    """Keep a white-background cover mandatory without blocking sparse galleries."""
+    if selected_count != 3:
+        raise ValueError("customer catalog requires exactly three image slots")
+    roles = tuple(str(item.get("role") or "") for item in selection)
+    if len(roles) != 3 or roles[0] != WHITE_BACKGROUND_ROLE or any(
+        role not in {WEARING_ROLE, SUPPLEMENTARY_ROLE} for role in roles[1:]
+    ):
+        raise ValueError(
+            "image role contract not met: rank 1 must be white-background product; "
+            "ranks 2-3 must be worn/on-person or clean supplementary product views"
+        )
+
+
 def select_with_doubao(
     record: Dict[str, Any],
     candidates: List[Dict[str, Any]],
@@ -198,21 +222,21 @@ def select_with_doubao(
         return None, "doubao environment variables are not configured"
 
     specs = record.get("specs") if isinstance(record.get("specs"), dict) else {}
-    prompt = f"""你是外贸产品目录的选图审核员。所有信息属于同一个 1688 商品，但候选图中可能混入推荐商品、尺寸图或重复图。
+    prompt = f"""你是外贸产品目录的严格选图审核员。所有信息属于同一个 1688 商品，但候选图中可能混入推荐商品、尺寸图或重复图。
 
 商品 offer_id：{record['offer_id']}
 标题：{record.get('title', '')}
 分类：{record.get('category', '')}
 规格：{json.dumps(specs, ensure_ascii=False)[:4000]}
 
-请从下面 {len(candidates)} 张候选图中选择恰好 {selected_count} 张，要求：
-1. 图片必须与标题和规格中的商品一致；不确定或疑似其他商品就不要选。
-2. 优先形成互补组合：白底/清晰主图、细节或不同角度、上身/场景或颜色款式。
-3. 排除重复图、低清图、二维码、纯文字促销图和只显示包装而没有产品的图。
-4. 第一名必须最适合作为客户目录主图。
-5. 只返回 JSON，不要 Markdown。格式：
-{{"offer_id":"{record['offer_id']}","selected":[{{"index":1,"role":"hero","reason":"简短原因"}}]}}
-role 只能是 hero/detail/lifestyle/variant/package/size_chart。
+    请从下面 {len(candidates)} 张候选图中选择恰好 {selected_count} 张，并严格按顺序返回：
+    1. 第 1 张：必须是同一商品的纯白或近纯白背景产品展示图；产品清晰、完整、无人物、无拼图、无文字促销。
+    2. 第 2、3 张：优先选择同一商品被真人实际佩戴/穿戴的图片，能看见产品在人体相应部位；有一张或两张合格穿戴图都应优先放入。若候选中没有更多合格穿戴图，选择清晰、非白底、不同角度的产品展示图补足，不能用二维码、尺寸图、纯文字促销图或包装图。
+    3. 所有图片都必须与该商品一致；排除推荐商品、重复图、低清图、二维码、尺寸图和纯文字促销图。
+    4. 只有在找不到第 1 张合格白底图时，才返回 {{"offer_id":"{record['offer_id']}","selected":[],"reason":"no qualified white-background product image"}}。
+    5. 只返回 JSON，不要 Markdown。合格时格式：
+    {{"offer_id":"{record['offer_id']}","selected":[{{"index":1,"role":"white_background_product","reason":"brief reason"}},{{"index":2,"role":"worn_on_person","reason":"brief reason"}},{{"index":3,"role":"supplementary_product_view","reason":"brief reason"}}]}}
+    role 只能是 white_background_product、worn_on_person 或 supplementary_product_view。
 """
     content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
     for candidate in candidates:
@@ -246,6 +270,9 @@ role 只能是 hero/detail/lifestyle/variant/package/size_chart。
     if str(data.get("offer_id")) != str(record["offer_id"]):
         raise ValueError("AI returned a different offer_id")
     selected = data.get("selected")
+    if selected == []:
+        reason = str(data.get("reason") or "insufficient qualified images")[:500]
+        raise NeedsHumanVisualReview(reason)
     if not isinstance(selected, list) or len(selected) != selected_count:
         raise ValueError(f"AI must select exactly {selected_count} images")
     valid_indices = {int(c["candidate_index"]) for c in candidates}
@@ -253,20 +280,21 @@ role 只能是 hero/detail/lifestyle/variant/package/size_chart。
     cleaned: List[Dict[str, Any]] = []
     for rank, item in enumerate(selected, start=1):
         index = int(item.get("index") or 0)
-        role = str(item.get("role") or "detail")
+        role = str(item.get("role") or "")
         if index not in valid_indices or index in seen:
             raise ValueError("AI returned invalid or duplicate image index")
         if role not in ALLOWED_ROLES:
-            role = "detail"
+            raise ValueError(f"AI returned unsupported image role: {role or '<empty>'}")
         seen.add(index)
         cleaned.append(
             {
                 "index": index,
                 "rank": rank,
-                "role": "hero" if rank == 1 else role,
+                "role": role,
                 "reason": str(item.get("reason") or "AI selected")[:1000],
             }
         )
+    _validate_role_order(cleaned, selected_count)
     return cleaned, "doubao"
 
 
@@ -280,7 +308,9 @@ def heuristic_selection(candidates: List[Dict[str, Any]], selected_count: int) -
         )
         chosen.append(next_item)
         remaining.remove(next_item)
-    roles = ["hero", "detail", "lifestyle"]
+    # This fallback is retained for local debugging only; normal catalog runs
+    # require visual-model approval for the white-background cover image.
+    roles = [WHITE_BACKGROUND_ROLE, SUPPLEMENTARY_ROLE, SUPPLEMENTARY_ROLE]
     return [
         {
             "index": int(item["candidate_index"]),
@@ -328,6 +358,11 @@ def process_one_job(store: LocalStore, cfg: Dict[str, Any], worker_id: str) -> b
 
         try:
             selection, method = select_with_doubao(record, candidates, selected_count, cfg)
+        except NeedsHumanVisualReview:
+            # A valid negative visual verdict is not an API failure and must
+            # never be retried automatically: every retry spends quota but
+            # cannot create absent white-background/worn images.
+            raise
         except Exception as exc:
             logger.warning("Doubao selection failed for %s: %s", offer_id, exc)
             if bool(selection_cfg.get("require_ai", True)):
@@ -340,6 +375,7 @@ def process_one_job(store: LocalStore, cfg: Dict[str, Any], worker_id: str) -> b
             method = "heuristic_fallback:no_ai_config"
         if len(selection) != selected_count:
             raise ValueError("selection did not produce the required number of images")
+        _validate_role_order(selection, selected_count)
 
         if final_dir.exists():
             _remove_tree_safely(final_dir, selected_root)
@@ -349,7 +385,9 @@ def process_one_job(store: LocalStore, cfg: Dict[str, Any], worker_id: str) -> b
         for candidate in candidates:
             index = int(candidate["candidate_index"])
             selected_meta = selection_by_index.get(index)
-            local_path = ""
+            # Candidates remain on disk when delete_unselected=false, allowing a
+            # human to audit/reselect without returning to the product page.
+            local_path = str(Path(candidate["temp_path"]).resolve())
             if selected_meta:
                 destination = final_dir / f"{int(selected_meta['rank']):02d}.jpg"
                 shutil.copy2(candidate["temp_path"], destination)
@@ -383,6 +421,10 @@ def process_one_job(store: LocalStore, cfg: Dict[str, Any], worker_id: str) -> b
                 _remove_tree_safely(child, selected_root)
         logger.info("selected %s images for offer %s via %s", selected_count, offer_id, method)
         return True
+    except NeedsHumanVisualReview as exc:
+        store.fail_job(offer_id, version_hash, f"manual visual review required: {exc}", max_attempts=1)
+        logger.info("image job requires manual visual review for %s: %s", offer_id, exc)
+        return True
     except Exception as exc:
         store.fail_job(offer_id, version_hash, str(exc), max_attempts)
         logger.exception("image job failed for %s", offer_id)
@@ -401,23 +443,33 @@ class ImageWorker:
         self.store = store
         self.cfg = cfg
         self.stop_event = threading.Event()
-        self.thread: Optional[threading.Thread] = None
-        self.worker_id = f"local-{uuid.uuid4().hex[:10]}"
+        self.threads: List[threading.Thread] = []
 
     def start(self) -> None:
-        if self.thread and self.thread.is_alive():
+        if any(thread.is_alive() for thread in self.threads):
             return
-        self.thread = threading.Thread(target=self._run, name="catalog-image-worker", daemon=True)
-        self.thread.start()
+        count = max(1, min(8, int(self.cfg.get("relay", {}).get("worker_count", 1))))
+        self.stop_event.clear()
+        self.threads = []
+        for index in range(count):
+            worker_id = f"local-{uuid.uuid4().hex[:10]}"
+            thread = threading.Thread(
+                target=self._run,
+                args=(worker_id,),
+                name=f"catalog-image-worker-{index + 1}",
+                daemon=True,
+            )
+            self.threads.append(thread)
+            thread.start()
 
     def stop(self, timeout: float = 10.0) -> None:
         self.stop_event.set()
-        if self.thread:
-            self.thread.join(timeout=timeout)
+        for thread in self.threads:
+            thread.join(timeout=timeout)
 
-    def _run(self) -> None:
+    def _run(self, worker_id: str) -> None:
         poll = float(self.cfg.get("relay", {}).get("worker_poll_seconds", 2.0))
         while not self.stop_event.is_set():
-            worked = process_one_job(self.store, self.cfg, self.worker_id)
+            worked = process_one_job(self.store, self.cfg, worker_id)
             if not worked:
                 self.stop_event.wait(poll)

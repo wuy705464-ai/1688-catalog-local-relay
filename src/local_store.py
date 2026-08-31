@@ -380,6 +380,75 @@ class LocalStore:
             ).fetchone()
         return {key: int(totals[key] or 0) for key in ("total", "ready", "pending", "processing", "failed")}
 
+    def requeue_image_refresh(self, limit: int = 0, offer_ids: Optional[Iterable[str]] = None) -> List[str]:
+        """Queue existing product snapshots for a new image-role policy.
+
+        The raw record, current selected images, and source URLs stay intact
+        until the replacement selection commits successfully.  This makes a
+        refresh recoverable and preserves offer_id/record_hash binding.
+        """
+        requested_ids = [str(value).strip() for value in (offer_ids or []) if str(value).strip()]
+        now = utc_now()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            query = "SELECT offer_id, record_hash FROM products"
+            params: List[Any] = []
+            if requested_ids:
+                placeholders = ",".join("?" for _ in requested_ids)
+                query += f" WHERE offer_id IN ({placeholders})"
+                params.extend(requested_ids)
+            query += " ORDER BY category, offer_id"
+            if limit > 0:
+                query += " LIMIT ?"
+                params.append(int(limit))
+            rows = conn.execute(query, params).fetchall()
+            queued: List[str] = []
+            for row in rows:
+                offer_id = str(row["offer_id"])
+                conn.execute(
+                    """UPDATE products SET selection_status='pending', selection_method='',
+                       selection_error='', selected_count=0, updated_at=? WHERE offer_id=?""",
+                    (now, offer_id),
+                )
+                conn.execute(
+                    """INSERT INTO image_jobs
+                       (offer_id, version_hash, status, attempts, not_before, worker_id, error, created_at, updated_at)
+                       VALUES (?, ?, 'pending', 0, ?, '', '', ?, ?)
+                       ON CONFLICT(offer_id) DO UPDATE SET
+                         version_hash=excluded.version_hash, status='pending', attempts=0,
+                         not_before=excluded.not_before, worker_id='', error='', updated_at=excluded.updated_at""",
+                    (offer_id, str(row["record_hash"]), now, now, now),
+                )
+                queued.append(offer_id)
+        return queued
+
+    def mark_image_review_required(self, offer_ids: Iterable[str], reason: str) -> List[str]:
+        """Stop retrying specific image jobs while retaining all saved evidence."""
+        ids = [str(value).strip() for value in offer_ids if str(value).strip()]
+        if not ids:
+            return []
+        now = utc_now()
+        message = f"manual visual review required: {_clean_text(reason, 1800)}"
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            updated: List[str] = []
+            for offer_id in ids:
+                product = conn.execute("SELECT offer_id FROM products WHERE offer_id=?", (offer_id,)).fetchone()
+                if not product:
+                    continue
+                conn.execute(
+                    """UPDATE products SET selection_status='failed', selection_error=?, updated_at=?
+                       WHERE offer_id=?""",
+                    (message, now, offer_id),
+                )
+                conn.execute(
+                    """UPDATE image_jobs SET status='failed', worker_id='', error=?, updated_at=?
+                       WHERE offer_id=?""",
+                    (message, now, offer_id),
+                )
+                updated.append(offer_id)
+        return updated
+
     def mark_processing(self, offer_id: str, version_hash: str) -> None:
         with self.connect() as conn:
             conn.execute(
@@ -413,3 +482,20 @@ class LocalStore:
                 item["selected_images"] = [dict(image) for image in images]
                 out.append(item)
         return out
+
+    def product_snapshots_for_review(self, limit: int = 0, offer_ids: Optional[Iterable[str]] = None) -> List[Dict[str, Any]]:
+        """Return immutable product snapshots for offline candidate-image review."""
+        ids = [str(value).strip() for value in (offer_ids or []) if str(value).strip()]
+        query = "SELECT * FROM products"
+        params: List[Any] = []
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            query += f" WHERE offer_id IN ({placeholders})"
+            params.extend(ids)
+        query += " ORDER BY category, offer_id"
+        if limit > 0:
+            query += " LIMIT ?"
+            params.append(int(limit))
+        with self.connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [{**dict(row), "record": json.loads(row["raw_json"])} for row in rows]

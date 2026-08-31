@@ -18,6 +18,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
+from openpyxl.worksheet.views import Selection
 from PIL import Image, ImageOps
 
 
@@ -131,6 +132,7 @@ def export_one(
     products: List[Dict[str, Any]],
     output_path: Path,
     cfg: Dict[str, Any],
+    freeze_panes: bool = True,
 ) -> Tuple[Path, Path]:
     if not products:
         raise ValueError("no products to export")
@@ -201,7 +203,21 @@ def export_one(
                 }
             )
         last_row = start_row + len(products) - 1
-        ws.freeze_panes = "A3"
+        if freeze_panes:
+            ws.freeze_panes = "A3"
+            # The template freezes both columns and rows. openpyxl keeps the old
+            # top-right/bottom-right selections when changing it to a row-only
+            # freeze, which makes desktop Excel repair sheet1.xml on open.
+            ws.sheet_view.selection = [
+                Selection(pane="bottomLeft", activeCell="A3", sqref="A3")
+            ]
+        else:
+            # Collection mode stays fully scrollable/editable. Re-export with
+            # freeze_panes=True only after the crawl is complete.
+            for sheet in wb.worksheets:
+                sheet.freeze_panes = None
+                sheet.sheet_view.selection = [Selection(activeCell="A1", sqref="A1")]
+            ws.sheet_view.selection = [Selection(activeCell="A3", sqref="A3")]
         ws.print_area = f"A1:L{last_row}"
         ws.sheet_view.showGridLines = False
         wb.save(output_path)
@@ -213,6 +229,44 @@ def export_one(
     return output_path, manifest_path
 
 
+def export_master_atomic(
+    template: Path,
+    products: List[Dict[str, Any]],
+    output_path: Path,
+    cfg: Dict[str, Any],
+    finalize: bool = False,
+) -> Tuple[Path, Path]:
+    """Replace one master workbook only after a complete aligned export.
+
+    The staging file keeps the existing master intact if validation or image
+    embedding fails. On Windows, Excel must be closed before the final replace;
+    frozen panes do not control the operating-system file lock.
+    """
+    output_path = output_path.resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    staging_path = output_path.with_name(f".{output_path.stem}.{uuid.uuid4().hex}.xlsx")
+    staging_manifest = staging_path.with_suffix(".manifest.json")
+    final_manifest = output_path.with_suffix(".manifest.json")
+    try:
+        export_one(
+            template=template,
+            products=products,
+            output_path=staging_path,
+            cfg=cfg,
+            freeze_panes=finalize,
+        )
+        staging_path.replace(output_path)
+        staging_manifest.replace(final_manifest)
+    except PermissionError as exc:
+        raise PermissionError(
+            f"Close the master workbook in Excel before syncing: {output_path}"
+        ) from exc
+    finally:
+        staging_path.unlink(missing_ok=True)
+        staging_manifest.unlink(missing_ok=True)
+    return output_path, final_manifest
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Export customer catalogs from the local SQLite database")
     parser.add_argument("--config", type=Path, default=None)
@@ -222,7 +276,21 @@ def main() -> None:
     parser.add_argument("--category", default="")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--all-categories-together", action="store_true")
+    parser.add_argument(
+        "--master-output",
+        type=Path,
+        default=None,
+        help="Atomically sync all ready products into this one master workbook",
+    )
+    parser.add_argument(
+        "--finalize",
+        action="store_true",
+        help="Freeze the first two rows in master output after crawling is complete",
+    )
     args = parser.parse_args()
+
+    if args.finalize and args.master_output is None:
+        parser.error("--finalize requires --master-output")
 
     cfg = load_runtime_config(args.config)
     relay_cfg = cfg.get("relay", {})
@@ -234,6 +302,18 @@ def main() -> None:
     products = store.products_for_export(category=args.category, limit=args.limit)
     if not products:
         raise SystemExit("No AI-selected products are ready for export")
+
+    if args.master_output is not None:
+        workbook_path, manifest_path = export_master_atomic(
+            template=template,
+            products=products,
+            output_path=args.master_output,
+            cfg=cfg,
+            finalize=args.finalize,
+        )
+        print(f"catalog:  {workbook_path}")
+        print(f"manifest: {manifest_path}")
+        return
 
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     if args.all_categories_together:

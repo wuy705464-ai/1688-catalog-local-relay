@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         1688 catalog local relay collector v3
 // @namespace    local.1688.catalog
-// @version      3.0.0
+// @version      3.0.3
 // @description  Capture one atomic product snapshot, queue it in IndexedDB, then sync to the localhost SQLite relay.
 // @match        https://detail.1688.com/offer/*.html*
 // @match        https://m.1688.com/offer/*.html*
+// @updateURL    https://raw.githubusercontent.com/wuy705464-ai/1688-catalog-local-relay/main/userscripts/1688-catalog-local-relay.user.js
+// @downloadURL  https://raw.githubusercontent.com/wuy705464-ai/1688-catalog-local-relay/main/userscripts/1688-catalog-local-relay.user.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -25,6 +27,7 @@
     const RETRY_INTERVAL_MS = 15000;
     let panel;
     let lastMessage = '准备中';
+    let lastAutoScheduledOfferId = '';
 
     function getToken() {
         return GM_getValue('relay_token', DEFAULT_TOKEN);
@@ -80,6 +83,16 @@
             const request = db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).getAll();
             request.onsuccess = () => resolve(request.result || []);
             request.onerror = () => reject(request.error);
+        });
+    }
+
+    async function outboxClear() {
+        const db = await openOutbox();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readwrite');
+            tx.objectStore(STORE_NAME).clear();
+            tx.oncomplete = resolve;
+            tx.onerror = () => reject(tx.error);
         });
     }
 
@@ -245,7 +258,7 @@
     function normalizeImageUrl(raw) {
         if (!raw || /^data:/i.test(raw)) return '';
         try {
-            const url = new URL(String(raw).replace(/&amp;/g, '&'), location.href);
+            const url = new URL(String(raw).replace(/\\\//g, '/').replace(/&amp;/g, '&'), location.href);
             if (!/^https?:$/.test(url.protocol)) return '';
             url.protocol = 'https:';
             return url.href;
@@ -255,54 +268,100 @@
     function imageKey(url) {
         try {
             const parsed = new URL(url);
-            return (parsed.hostname + parsed.pathname)
+            const path = parsed.pathname
+                .replace(/(\.(?:jpe?g|png|webp))_(?:\d+x\d+(?:q\d+)?|[^/?]*)\.(?:jpe?g|png|webp)$/i, '$1')
                 .replace(/_\d+x\d+(?:q\d+)?(?=\.(?:jpg|jpeg|png|webp)$)/i, '')
                 .toLowerCase();
+            return (parsed.hostname + path).toLowerCase();
         } catch (_) { return url.toLowerCase(); }
+    }
+
+    function embeddedImageSize(url) {
+        try {
+            const path = decodeURIComponent(new URL(url).pathname);
+            const tps = path.match(/-\d+-tps-(\d+)-(\d+)(?:\.|$)/i);
+            if (tps) return [Number(tps[1]), Number(tps[2])];
+            const resized = path.match(/_(\d+)x(\d+)(?:q\d+)?(?=\.(?:jpe?g|png|webp)$)/i);
+            if (resized) return [Number(resized[1]), Number(resized[2])];
+        } catch (_) { /* ignore malformed URLs */ }
+        return null;
+    }
+
+    function isPageAssetUrl(url) {
+        const lower = url.toLowerCase();
+        if (!/\.(?:jpe?g|png|webp)(?:$|[?#_])/i.test(lower)) return true;
+        if (/(?:avatar|logo|icon|loading|spacer|qrcode|emoji|sprite|favicon)/i.test(lower)) return true;
+        if (/(?:-rate\.|\/rate\/|comment|review)/i.test(lower)) return true;
+        if (/-\d+-tps-/i.test(lower)) return true;
+        const size = embeddedImageSize(url);
+        return Boolean(size && (size[0] < 320 || size[1] < 320));
+    }
+
+    function imageScore(url, sourcePriority) {
+        let score = sourcePriority;
+        try {
+            const parsed = new URL(url);
+            const host = parsed.hostname.toLowerCase();
+            const path = parsed.pathname.toLowerCase();
+            if (host === 'cbu01.alicdn.com' && path.includes('/img/ibank/')) score += 2400;
+            else if (path.includes('/img/ibank/')) score += 1900;
+            if (/-0-cib\./i.test(path)) score += 500;
+            if (/\.(?:jpe?g|webp)(?:$|_)/i.test(path)) score += 120;
+            if (path.includes('/imgextra/')) score -= 100;
+        } catch (_) { /* normalized URLs are expected to parse */ }
+        return score;
     }
 
     function extractImageUrls() {
         const highPrioritySelectors = [
             '[class*="gallery"] img', '[class*="Gallery"] img',
+            '[class*="detail-gallery"] img', '[class*="image-viewer"] img',
             '[class*="main-image"] img', '[class*="mainImage"] img',
             '[class*="image-list"] img', '[class*="imageList"] img',
             '[class*="offer-img"] img', '[class*="od-pc-offer-image"] img',
             '[class*="thumbnail"] img', '[class*="thumb"] img',
+            '[data-testid*="gallery"] img', '[data-testid*="image"] img',
             'video[poster]',
         ];
         const ordered = [];
         const seenElements = new Set();
         for (const selector of highPrioritySelectors) {
             for (const element of document.querySelectorAll(selector)) {
-                if (!seenElements.has(element)) { seenElements.add(element); ordered.push(element); }
+                if (!seenElements.has(element)) { seenElements.add(element); ordered.push([element, 700]); }
             }
         }
         for (const element of document.querySelectorAll('img')) {
             const rect = element.getBoundingClientRect();
             const source = `${element.currentSrc || ''} ${element.src || ''}`.toLowerCase();
             if ((rect.top + scrollY < 2200 && rect.width >= 45 && rect.height >= 45) || source.includes('imgextra')) {
-                if (!seenElements.has(element)) { seenElements.add(element); ordered.push(element); }
+                if (!seenElements.has(element)) { seenElements.add(element); ordered.push([element, 200]); }
             }
         }
-        const urls = [];
-        const seen = new Set();
-        function add(raw) {
+        const ranked = new Map();
+        let order = 0;
+        function add(raw, sourcePriority = 0) {
             const url = normalizeImageUrl(raw);
-            if (!url || /(avatar|logo|icon|loading|spacer|qrcode)/i.test(url)) return;
+            if (!url || isPageAssetUrl(url)) return;
             if (!/(alicdn|1688)/i.test(url)) return;
             const key = imageKey(url);
-            if (seen.has(key)) return;
-            seen.add(key); urls.push(url);
+            const candidate = { url, score: imageScore(url, sourcePriority), order: order++ };
+            const existing = ranked.get(key);
+            if (!existing || candidate.score > existing.score) ranked.set(key, candidate);
         }
-        ordered.forEach(element => elementImageUrls(element).forEach(add));
+        ordered.forEach(([element, priority]) => elementImageUrls(element).forEach(url => add(url, priority)));
 
-        if (urls.length < 12) {
-            const html = document.documentElement.outerHTML;
-            const regex = /https?:\\?\/\\?\/[^"'\s<>]+?\.(?:jpg|jpeg|png|webp)(?:\?[^"'\s<>]*)?/gi;
-            let match;
-            while ((match = regex.exec(html)) !== null && urls.length < 32) add(match[0].replace(/\\\//g, '/'));
+        const html = document.documentElement.outerHTML;
+        const regex = /https?:\\?\/\\?\/[^"'\s<>]+?\.(?:jpg|jpeg|png|webp)(?:\?[^"'\s<>]*)?/gi;
+        let match;
+        let scanned = 0;
+        while ((match = regex.exec(html)) !== null && scanned < 512) {
+            add(match[0], 0);
+            scanned += 1;
         }
-        return urls.slice(0, 32);
+        return [...ranked.values()]
+            .sort((left, right) => right.score - left.score || left.order - right.order)
+            .slice(0, 32)
+            .map(item => item.url);
     }
 
     function collectRecord() {
@@ -361,6 +420,19 @@
         await refreshPanel();
     }
 
+    async function clearOutbox() {
+        const pending = (await outboxAll()).length;
+        if (!pending) {
+            lastMessage = '没有待发送记录';
+            return refreshPanel();
+        }
+        if (!window.confirm(`确定清空浏览器中的 ${pending} 条待发送记录吗？此操作不会删除本机数据库。`)) return;
+        await outboxClear();
+        lastMessage = `已清空 ${pending} 条浏览器待发送记录`;
+        showToast(lastMessage, 'ok');
+        await refreshPanel();
+    }
+
     async function exportBackup() {
         const records = await outboxAll();
         const blob = new Blob([JSON.stringify(records, null, 2)], { type: 'application/json;charset=utf-8' });
@@ -375,6 +447,7 @@
         if (!panel) return;
         const pending = (await outboxAll()).length;
         panel.querySelector('.relay-pending').textContent = String(pending);
+        panel.querySelector('.relay-current-offer').textContent = extractOfferId() || '未识别';
         panel.querySelector('.relay-message').textContent = lastMessage;
         try {
             const stats = await relayRequest('GET', '/api/v1/stats');
@@ -391,14 +464,16 @@
     function createPanel() {
         panel = document.createElement('div');
         panel.innerHTML = `
-          <div style="font-weight:700;color:#ff6a00;margin-bottom:5px">1688 本机采集器 v3</div>
+          <div style="font-weight:700;color:#ff6a00;margin-bottom:5px">1688 本机采集器 v3.0.1</div>
           <div class="relay-state">检查中</div>
           <div>数据库：<b class="relay-total">0</b> / 选图完成：<b class="relay-ready">0</b></div>
           <div>待发送：<b class="relay-pending">0</b></div>
+          <div style="font-size:11px;color:#666">当前商品：<span class="relay-current-offer">未识别</span></div>
           <div class="relay-message" style="font-size:11px;color:#666;min-height:32px;margin:5px 0">准备中</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">
             <button class="relay-collect">重新采集</button>
             <button class="relay-sync">同步待办</button>
+            <button class="relay-clear">清空待办</button>
             <button class="relay-token">设置令牌</button>
             <button class="relay-backup">备份待办</button>
           </div>`;
@@ -406,6 +481,10 @@
         for (const button of panel.querySelectorAll('button')) button.style.cssText = 'border:0;border-radius:4px;padding:6px;cursor:pointer;background:#f0f0f0';
         panel.querySelector('.relay-collect').onclick = collectAndSync;
         panel.querySelector('.relay-sync').onclick = syncAll;
+        panel.querySelector('.relay-clear').onclick = () => clearOutbox().catch(error => {
+            lastMessage = `清空失败：${error.message}`;
+            showToast(lastMessage, 'warn'); refreshPanel();
+        });
         panel.querySelector('.relay-token').onclick = setToken;
         panel.querySelector('.relay-backup').onclick = exportBackup;
         document.body.appendChild(panel);
@@ -425,8 +504,17 @@
         await refreshPanel();
         window.scrollTo({ top: Math.min(document.body.scrollHeight, 2400), behavior: 'smooth' });
         setTimeout(() => window.scrollTo({ top: 0, behavior: 'smooth' }), 1600);
-        setTimeout(collectAndSync, AUTO_COLLECT_DELAY_MS);
+        scheduleAutoCollect(extractOfferId());
         setInterval(syncAll, RETRY_INTERVAL_MS);
+        setInterval(() => scheduleAutoCollect(extractOfferId()), 1000);
+    }
+
+    function scheduleAutoCollect(offerId) {
+        if (!offerId || offerId === lastAutoScheduledOfferId) return;
+        lastAutoScheduledOfferId = offerId;
+        setTimeout(() => {
+            if (extractOfferId() === offerId) collectAndSync();
+        }, AUTO_COLLECT_DELAY_MS);
     }
 
     start();
