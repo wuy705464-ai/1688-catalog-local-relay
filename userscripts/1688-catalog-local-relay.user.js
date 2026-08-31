@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         1688 catalog local relay collector v3
 // @namespace    local.1688.catalog
-// @version      3.0.2
+// @version      3.0.3
 // @description  Capture one atomic product snapshot, queue it in IndexedDB, then sync to the localhost SQLite relay.
 // @match        https://detail.1688.com/offer/*.html*
 // @match        https://m.1688.com/offer/*.html*
+// @updateURL    https://raw.githubusercontent.com/wuy705464-ai/1688-catalog-local-relay/main/userscripts/1688-catalog-local-relay.user.js
+// @downloadURL  https://raw.githubusercontent.com/wuy705464-ai/1688-catalog-local-relay/main/userscripts/1688-catalog-local-relay.user.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
