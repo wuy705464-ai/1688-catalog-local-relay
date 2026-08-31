@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         1688 catalog local relay collector v3
 // @namespace    local.1688.catalog
-// @version      3.0.1
+// @version      3.0.2
 // @description  Capture one atomic product snapshot, queue it in IndexedDB, then sync to the localhost SQLite relay.
 // @match        https://detail.1688.com/offer/*.html*
 // @match        https://m.1688.com/offer/*.html*
@@ -25,6 +25,7 @@
     const RETRY_INTERVAL_MS = 15000;
     let panel;
     let lastMessage = '准备中';
+    let lastAutoScheduledOfferId = '';
 
     function getToken() {
         return GM_getValue('relay_token', DEFAULT_TOKEN);
@@ -80,6 +81,16 @@
             const request = db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).getAll();
             request.onsuccess = () => resolve(request.result || []);
             request.onerror = () => reject(request.error);
+        });
+    }
+
+    async function outboxClear() {
+        const db = await openOutbox();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readwrite');
+            tx.objectStore(STORE_NAME).clear();
+            tx.oncomplete = resolve;
+            tx.onerror = () => reject(tx.error);
         });
     }
 
@@ -407,6 +418,19 @@
         await refreshPanel();
     }
 
+    async function clearOutbox() {
+        const pending = (await outboxAll()).length;
+        if (!pending) {
+            lastMessage = '没有待发送记录';
+            return refreshPanel();
+        }
+        if (!window.confirm(`确定清空浏览器中的 ${pending} 条待发送记录吗？此操作不会删除本机数据库。`)) return;
+        await outboxClear();
+        lastMessage = `已清空 ${pending} 条浏览器待发送记录`;
+        showToast(lastMessage, 'ok');
+        await refreshPanel();
+    }
+
     async function exportBackup() {
         const records = await outboxAll();
         const blob = new Blob([JSON.stringify(records, null, 2)], { type: 'application/json;charset=utf-8' });
@@ -421,6 +445,7 @@
         if (!panel) return;
         const pending = (await outboxAll()).length;
         panel.querySelector('.relay-pending').textContent = String(pending);
+        panel.querySelector('.relay-current-offer').textContent = extractOfferId() || '未识别';
         panel.querySelector('.relay-message').textContent = lastMessage;
         try {
             const stats = await relayRequest('GET', '/api/v1/stats');
@@ -441,10 +466,12 @@
           <div class="relay-state">检查中</div>
           <div>数据库：<b class="relay-total">0</b> / 选图完成：<b class="relay-ready">0</b></div>
           <div>待发送：<b class="relay-pending">0</b></div>
+          <div style="font-size:11px;color:#666">当前商品：<span class="relay-current-offer">未识别</span></div>
           <div class="relay-message" style="font-size:11px;color:#666;min-height:32px;margin:5px 0">准备中</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">
             <button class="relay-collect">重新采集</button>
             <button class="relay-sync">同步待办</button>
+            <button class="relay-clear">清空待办</button>
             <button class="relay-token">设置令牌</button>
             <button class="relay-backup">备份待办</button>
           </div>`;
@@ -452,6 +479,10 @@
         for (const button of panel.querySelectorAll('button')) button.style.cssText = 'border:0;border-radius:4px;padding:6px;cursor:pointer;background:#f0f0f0';
         panel.querySelector('.relay-collect').onclick = collectAndSync;
         panel.querySelector('.relay-sync').onclick = syncAll;
+        panel.querySelector('.relay-clear').onclick = () => clearOutbox().catch(error => {
+            lastMessage = `清空失败：${error.message}`;
+            showToast(lastMessage, 'warn'); refreshPanel();
+        });
         panel.querySelector('.relay-token').onclick = setToken;
         panel.querySelector('.relay-backup').onclick = exportBackup;
         document.body.appendChild(panel);
@@ -471,8 +502,17 @@
         await refreshPanel();
         window.scrollTo({ top: Math.min(document.body.scrollHeight, 2400), behavior: 'smooth' });
         setTimeout(() => window.scrollTo({ top: 0, behavior: 'smooth' }), 1600);
-        setTimeout(collectAndSync, AUTO_COLLECT_DELAY_MS);
+        scheduleAutoCollect(extractOfferId());
         setInterval(syncAll, RETRY_INTERVAL_MS);
+        setInterval(() => scheduleAutoCollect(extractOfferId()), 1000);
+    }
+
+    function scheduleAutoCollect(offerId) {
+        if (!offerId || offerId === lastAutoScheduledOfferId) return;
+        lastAutoScheduledOfferId = offerId;
+        setTimeout(() => {
+            if (extractOfferId() === offerId) collectAndSync();
+        }, AUTO_COLLECT_DELAY_MS);
     }
 
     start();
